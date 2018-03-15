@@ -1,0 +1,151 @@
+#! /usr/bin/env python3
+#
+#  mcramify is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  mcramify is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with mcramify.  If not, see <http://www.gnu.org/licenses/>.
+#
+######################################################################
+"""mcramify.
+
+Extracts a Minecraft server into a tmpfs and packs it back.
+
+Usage:
+    mcramify (ramify|unramify) <server> [options]
+
+Options:
+    --help, -h      Show this page
+"""
+from pathlib import Path
+from subprocess import CalledProcessError, check_call
+from sys import exit as exit_, stderr
+from tarfile import open as TarFile
+
+from docopt import docopt
+
+
+ARCHIVES_DIR = Path('/srv/minecraft/archives')
+RUN_DIR = Path('/run/minecraft')
+MINECRAFT_USER = 'minecraft'
+
+
+class DirectoryNotEmpty(Exception):
+    """Indicates that the mountpoint directory is not empty."""
+
+    pass
+
+
+class ArchiveNotFound(Exception):
+    """Indicates that the respective archive could not be found."""
+
+    pass
+
+
+def mount(mountpoint, size):
+    """Mounts a tmpfs."""
+
+    return check_call((
+        '/usr/bin/mount', '-t', 'tmpfs', '-o', f'size={size}', 'tmpfs',
+        f'{mountpoint}'))
+
+
+def umount(mountpoint):
+    """Umounts a mount point."""
+
+    return check_call(('/usr/bin/umount', f'{mountpoint}'))
+
+
+def untar(archive, directory):
+    """Unpacks an archive to the respective directory."""
+
+    with TarFile(name=str(archive), mode='r') as tarfile:
+        tarfile.extractall(path=str(directory))
+
+
+def tar(archive, directory):
+    """Packs a folder's content into the respective tar file."""
+
+    with TarFile(name=str(archive), mode='w') as tarfile:
+        for inode in directory.iterdir():
+            tarfile.add(inode, arcname=str(inode.relative_to(directory)))
+
+
+def chown(username, path):
+    """Changes the owner of the respective directory."""
+
+    return check_call((
+        '/usr/bin/chown', '-R', f'{username}:{username}', str(path)))
+
+
+def ramify(server):
+    """Ramifies the respective server."""
+
+    archive = ARCHIVES_DIR.joinpath(f'{server}.tar')
+
+    if not archive.is_file():
+        raise ArchiveNotFound(archive)
+
+    size = archive.stat().st_size
+    directory = RUN_DIR.joinpath(server)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    for _ in directory.iterdir():
+        raise DirectoryNotEmpty()
+
+    mount(directory, 2*size)
+    untar(archive, directory)
+    chown(MINECRAFT_USER, directory)
+
+
+def unramify(server):
+    """Unramifies the respective server."""
+
+    archive = ARCHIVES_DIR.joinpath(f'{server}.tar')
+    directory = RUN_DIR.joinpath(server)
+    tar(archive, directory)
+    chown(MINECRAFT_USER, archive)
+    umount(directory)
+
+
+def die(message, exit_code):
+    """Print a message to stderr and exits with the respective code."""
+
+    print(message, file=stderr, flush=True)
+    exit_(exit_code)
+
+
+def main(options):
+    """Runs the script."""
+
+    server = options['<server>']
+
+    if options['ramify']:
+        try:
+            ramify(server)
+        except ArchiveNotFound as anf:
+            die(f'Server archive not found: {anf}', 1)
+        except DirectoryNotEmpty:
+            die('Directory not empty.', 2)
+        except OSError as os_error:
+            die(f'OS Error: {os_error}', 3)
+        except CalledProcessError as cpe:
+            die(f'Failed to mount tmpfs: {cpe}', 4)
+    elif options['unramify']:
+        try:
+            unramify(server)
+        except ArchiveNotFound as anf:
+            die(f'Server archive not found: {anf}', 1)
+        except CalledProcessError as cpe:
+            die(f'Failed to umount tmpfs: {cpe}', 5)
+
+
+if __name__ == '__main__':
+    main(docopt(__doc__))
